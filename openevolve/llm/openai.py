@@ -8,6 +8,7 @@ to a task queue directory and the system waits for a corresponding *.answer.json
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -63,6 +64,13 @@ class OpenAILLM(LLMInterface):
         self.api_key = model_cfg.api_key
         self.random_seed = getattr(model_cfg, "random_seed", None)
         self.reasoning_effort = getattr(model_cfg, "reasoning_effort", None)
+        self.usage_log_path = os.environ.get("OPENEVOLVE_USAGE_LOG")
+        self.token_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "calls": 0,
+        }
 
         # Manual mode: enabled via llm.manual_mode in config.yaml
         self.manual_mode = (getattr(model_cfg, "manual_mode", False) is True)
@@ -219,6 +227,30 @@ class OpenAILLM(LLMInterface):
         response = await loop.run_in_executor(
             None, lambda: self.client.chat.completions.create(**params)
         )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            total_tokens = int(
+                getattr(usage, "total_tokens", prompt_tokens + completion_tokens) or 0
+            )
+            self.token_usage["prompt_tokens"] += prompt_tokens
+            self.token_usage["completion_tokens"] += completion_tokens
+            self.token_usage["total_tokens"] += total_tokens
+            self.token_usage["calls"] += 1
+            if self.usage_log_path:
+                record = {
+                    "ts": time.time(),
+                    "model": self.model,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                }
+                try:
+                    with open(self.usage_log_path, "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(record) + "\n")
+                except OSError:
+                    pass
         # Logging of system prompt, user message and response content
         logger = logging.getLogger(__name__)
         logger.debug(f"API parameters: {params}")
